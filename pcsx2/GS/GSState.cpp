@@ -105,7 +105,6 @@ GSState::GSState()
 	s_n = 0;
 	s_transfer_n = 0;
 
-
 	memset(&m_v, 0, sizeof(m_v));
 	memset(m_mem.m_vm8, 0, m_mem.m_vmsize);
 
@@ -373,6 +372,7 @@ void GSState::ResetDrawBufferIdx()
 void GSState::ResetDrawBuffers()
 {
 	m_used_buffers_idx = 1;
+	m_max_vertex_count = 0;
 
 	for (int i = 0; i < MAX_DRAW_BUFFERS; i++)
 	{
@@ -383,9 +383,9 @@ void GSState::ResetDrawBuffers()
 		m_index = &m_index_buffers[i];
 		m_vertex = &m_vertex_buffers[i];
 		m_vertex_buffers[i].head = m_vertex_buffers[i].tail = m_vertex_buffers[i].next = 0;
-		GrowVertexBuffer();
 	}
 
+	GrowVertexBuffer();
 	ResetDrawBufferIdx();
 }
 
@@ -473,15 +473,16 @@ void GSState::PushBuffer()
 		m_index = &m_index_buffers[m_used_buffers_idx];
 		m_vertex = &m_vertex_buffers[m_used_buffers_idx];
 		GSVertexBuff& vtx_buff = *m_vertex;
-		GSIndexBuff& idx_buff = *m_index;
 
 		const u32 base = m_vertex_buffers[m_current_buffer_idx].head;
-		const u32 copy_amt = m_vertex_buffers[m_current_buffer_idx].tail - base;
+		u32 copy_amt = m_vertex_buffers[m_current_buffer_idx].tail - base;
 
 		m_vertex->tail = 0;
 
-		if (copy_amt)
+		if (copy_amt && m_env.PRIM.PRIM == m_env_buffers[m_current_buffer_idx].m_env.PRIM.PRIM)
 			memcpy(vtx_buff.buff, &m_vertex_buffers[m_current_buffer_idx].buff[base], sizeof(GSVertex) * copy_amt);
+		else
+			copy_amt = 0;
 
 		vtx_buff.head = 0;
 		vtx_buff.next = 0;
@@ -638,20 +639,27 @@ bool GSState::CanBufferNewDraw()
 				GSVertexBuff& vtx_buff = *m_vertex;
 				GSIndexBuff& idx_buff = *m_index;
 
-				const u32 copy_amt = m_vertex_buffers[m_current_buffer_idx].tail - m_vertex_buffers[m_current_buffer_idx].head;
-
-				m_recent_buffer_switch = vtx_buff.tail == vtx_buff.head;
 				if (idx_buff.tail)
-					vtx_buff.tail = idx_buff.buff[idx_buff.tail - 1] + 1;
+					vtx_buff.tail = std::max(idx_buff.buff[idx_buff.tail - 1], idx_buff.buff[std::max(static_cast<int>(idx_buff.tail) - 2, 0)]) + 1;
 				else
 					vtx_buff.tail = 0;
 
-				if (copy_amt)
-					memcpy(&vtx_buff.buff[vtx_buff.tail], &m_vertex_buffers[m_current_buffer_idx].buff[m_vertex_buffers[m_current_buffer_idx].head], sizeof(GSVertex) * copy_amt);
-
 				vtx_buff.head = vtx_buff.tail;
 				vtx_buff.next = vtx_buff.head;
-				vtx_buff.tail += copy_amt;
+
+				u32 copy_amt = m_vertex_buffers[m_current_buffer_idx].tail - m_vertex_buffers[m_current_buffer_idx].head;
+
+				if (copy_amt && m_env_buffers[i].m_env.PRIM.PRIM == m_env_buffers[m_current_buffer_idx].m_env.PRIM.PRIM)
+				{
+					memcpy(&vtx_buff.buff[vtx_buff.tail], &m_vertex_buffers[m_current_buffer_idx].buff[m_vertex_buffers[m_current_buffer_idx].head], sizeof(GSVertex) * copy_amt);
+
+					vtx_buff.tail += copy_amt;
+				}
+				else
+					copy_amt = 0;
+
+				m_recent_buffer_switch = vtx_buff.tail == vtx_buff.head;
+
 				m_backed_up_ctx = m_env_buffers[i].m_backed_up_ctx;
 				temp_draw_rect = m_env_buffers[i].draw_rect;
 				m_env_buffers[i].m_dirty_regs = 0;
@@ -678,7 +686,6 @@ bool GSState::CanBufferNewDraw()
 					vtx_buff.xy_tail = 0;
 
 				m_current_buffer_idx = i;
-
 			}
 
 			m_dirty_gs_regs = 0;
@@ -1352,8 +1359,9 @@ void GSState::DumpTransferImages()
 				transfer.rect.x, transfer.rect.y, transfer.rect.z, transfer.rect.w);
 		}
 
-		m_mem.SaveBMP(filename, transfer.blit.DBP, transfer.blit.DBW, transfer.blit.DPSM,
-			transfer.rect.width(), transfer.rect.height(), transfer.rect.x, transfer.rect.y);
+		if (!transfer.was_hardware_only)
+			m_mem.SaveBMP(filename, transfer.blit.DBP, transfer.blit.DBW, transfer.blit.DPSM,
+				transfer.rect.width(), transfer.rect.height(), transfer.rect.x, transfer.rect.y);
 	}
 }
 
@@ -2496,6 +2504,11 @@ u32 GSState::CalcMask(int exp, int max_exp)
 	return (1 << std::min(amount, 23)) - 1;
 }
 
+void GSState::IncDraw()
+{
+	s_n++;
+}
+
 void GSState::FlushPrim()
 {
 	if (m_index->tail > 0)
@@ -2518,7 +2531,7 @@ void GSState::FlushPrim()
 		GSVertex buff[2];
 		GSVertexBuff& vtx_buff = *m_vertex;
 		GSIndexBuff& idx_buff = *m_index;
-		s_n++;
+		IncDraw();
 
 		const u32 head = vtx_buff.head;
 		const u32 tail = vtx_buff.tail;
@@ -2527,7 +2540,8 @@ void GSState::FlushPrim()
 
 		if (tail > head)
 		{
-			switch (PRIM->PRIM)
+			// NOTE: Do not use PRIM->PRIM as the previous environment may have been restored and it may have changed from strip to fan, which messes up the backup.
+			switch (m_env.PRIM.PRIM)
 			{
 				case GS_POINTLIST:
 					pxAssert(0);
@@ -2667,7 +2681,7 @@ void GSState::FlushPrim()
 
 			// If it's a Triangle fan the XY buffer needs to be updated to point to the correct head vert
 			// Jak 3 shadows get spikey (with autoflush) if you don't.
-			if (PRIM->PRIM == GS_TRIANGLEFAN)
+			if (m_env.PRIM.PRIM == GS_TRIANGLEFAN)
 			{
 				for (u32 i = 0; i < unused; i++)
 				{
@@ -2919,11 +2933,12 @@ void GSState::Write(const u8* mem, int len)
 			m_draw_transfers.pop_back();
 			transfer.rect = transfer.rect.runion(r);
 			transfer.draw = s_n;
+			transfer.was_hardware_only = false;
 			m_draw_transfers.push_back(transfer);
 		}
 		else
 		{
-			const GSUploadQueue new_transfer = {blit, s_n, r, EEGS_TransferType::EE_to_GS};
+			const GSUploadQueue new_transfer = {blit, s_n, r, EEGS_TransferType::EE_to_GS, false};
 			m_draw_transfers.push_back(new_transfer);
 		}
 
@@ -3118,11 +3133,12 @@ void GSState::Move()
 		m_draw_transfers.pop_back();
 		transfer.rect = transfer.rect.runion(r);
 		transfer.draw = s_n;
+		transfer.was_hardware_only = false;
 		m_draw_transfers.push_back(transfer);
 	}
 	else
 	{
-		const GSUploadQueue new_transfer = {m_env.BITBLTBUF, s_n, r, EEGS_TransferType::GS_to_GS};
+		const GSUploadQueue new_transfer = {m_env.BITBLTBUF, s_n, r, EEGS_TransferType::GS_to_GS, false};
 		m_draw_transfers.push_back(new_transfer);
 	}
 
@@ -3817,56 +3833,49 @@ void GSState::UpdateVertexKick()
 	m_fpGIFPackedRegHandlersC[GIF_REG_STQRGBAXYZ2] = m_fpGIFPackedRegHandlerSTQRGBAXYZ2[prim];
 }
 
+static void GrowBuffer(void** pbuff, size_t old_size, size_t new_size, bool vertices)
+{
+	void* new_buff = _aligned_malloc(new_size, 32);
+	if (!new_buff)
+	{
+		Console.Error("GS: failed to allocate %zu bytes for %s.", new_size, vertices ? "vertices" : "indices");
+		pxFailRel("Memory allocation failed");
+	}
+	if (*pbuff)
+	{
+		if (old_size)
+		{
+			std::memcpy(new_buff, *pbuff, old_size);
+		}
+		_aligned_free(*pbuff);
+	}
+	*pbuff = new_buff;
+}
+
+template <typename T>
+static void GrowBuffer(T** pbuff, size_t old_count, size_t new_count)
+{
+	static_assert(std::is_same_v<T, GSVertex> || std::is_same_v<T, u16>, "For use with indices or vertices");
+	GrowBuffer(reinterpret_cast<void**>(pbuff), old_count * sizeof(T), new_count * sizeof(T), std::is_same_v<T, GSVertex>);
+}
+
 void GSState::GrowVertexBuffer()
 {
-	const u32 maxcount = std::max<u32>(m_vertex->maxcount * 3 / 2, 10000);
-	const u32 old_vertex_size = sizeof(GSVertex) * m_vertex->tail;
-	const u32 new_vertex_size = sizeof(GSVertex) * maxcount;
-	const u32 old_index_size = sizeof(u16) * m_index->tail;
-	const u32 new_index_size = sizeof(u16) * maxcount * 6; // Worst case index list is a list of points with vs expansion, 6 indices per point
+	const u32 maxcount = std::max<u32>(m_max_vertex_count * 3 / 2, 10000);
+	const u32 new_vertex_count = maxcount;
+	const u32 new_index_count = maxcount * 6; // Worst case index list is a list of points with vs expansion, 6 indices per point
 
-	// Structure describing buffers to reallocate
-	struct AllocDesc
+	for (GSVertexBuff& buf : m_vertex_buffers)
 	{
-		void** pbuff;
-		u32 old_size;
-		u32 new_size;
-	};
-	const std::array<AllocDesc, 5> alloc_desc = {{
-		{reinterpret_cast<void**>(&m_vertex->buff),      old_vertex_size, new_vertex_size},
-		// discard contents of buff_copy by setting old_size = 0
-		{reinterpret_cast<void**>(&m_vertex->buff_copy), 0,               new_vertex_size},
-		{reinterpret_cast<void**>(&m_draw_vertex.buff), old_vertex_size, new_vertex_size},
-		{reinterpret_cast<void**>(&m_index->buff),       old_index_size,  new_index_size},
-		{reinterpret_cast<void**>(&m_draw_index.buff),  old_index_size,  new_index_size}
-	}};
-
-	// For logging
-	u32 total_size = 0;
-	for (const auto& desc : alloc_desc)
-		total_size += desc.new_size;
-
-	// Reallocate each of the needed buffers
-	for (const auto [pbuff, old_size, new_size] : alloc_desc)
-	{
-		void* new_buff = _aligned_malloc(new_size, 32);
-		if (!new_buff)
-		{
-			Console.Error("GS: failed to allocate %zu bytes for vertices and indices.", total_size);
-			pxFailRel("Memory allocation failed");
-		}
-		if (*pbuff)
-		{
-			if (old_size)
-			{
-				std::memcpy(new_buff, *pbuff, old_size);
-			}
-			_aligned_free(*pbuff);
-		}
-		*pbuff = new_buff;
+		GrowBuffer(&buf.buff, buf.tail, new_vertex_count);
+		GrowBuffer(&buf.buff_copy, 0, new_vertex_count);
 	}
+	for (GSIndexBuff& buf : m_index_buffers)
+		GrowBuffer(&buf.buff, buf.tail, new_index_count);
+	GrowBuffer(&m_draw_vertex.buff, m_vertex->tail, new_vertex_count);
+	GrowBuffer(&m_draw_index.buff, m_index->tail, new_index_count);
 
-	m_vertex->maxcount = maxcount - 3; // -3 to have some space at the end of the buffer before DrawingKick can grow it
+	m_max_vertex_count = maxcount - 3; // -3 to have some space at the end of the buffer before DrawingKick can grow it
 }
 
 // For returning order of vertices to form a right triangle
@@ -5835,7 +5844,7 @@ __forceinline void GSState::VertexKick(u32 skip)
 	GSVertexBuff& vtx_buff = *m_vertex;
 	GSIndexBuff& idx_buff = *m_index;
 	static_assert(n > 0);
-	pxAssert(vtx_buff.tail < vtx_buff. maxcount + 3);
+	pxAssert(vtx_buff.tail < m_max_vertex_count + 3);
 
 	if constexpr (prim == GS_INVALID)
 	{
@@ -5972,7 +5981,7 @@ __forceinline void GSState::VertexKick(u32 skip)
 				vtx_buff.head = head + 1;
 				[[fallthrough]];
 			case GS_TRIANGLEFAN:
-				if (tail >= vtx_buff.maxcount)
+				if (tail >= m_max_vertex_count)
 					GrowVertexBuffer(); // in case too many vertices were skipped
 				break;
 			default:
@@ -5996,7 +6005,7 @@ __forceinline void GSState::VertexKick(u32 skip)
 			SetDrawBufferEnv();
 	}
 
-	if (tail >= vtx_buff.maxcount)
+	if (tail >= m_max_vertex_count)
 		GrowVertexBuffer();
 
 	u16* RESTRICT buff = &idx_buff.buff[idx_buff.tail];
@@ -6836,6 +6845,159 @@ GIFRegTEX0 GSState::GetTex0Layer(u32 lod)
 	return TEX0;
 }
 
+// Fix large ST coorindates that may cause graphical glitches.
+template <u32 primclass>
+void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool check_clamp_mode)
+{
+	// Need to be texture mapping with ST and not have so many vertices that rewritten indices will overflow.
+	if (PRIM->TME && PRIM->FST == 0)
+	{
+		const float tw = static_cast<float>(1 << m_context->TEX0.TW);
+		const float th = static_cast<float>(1 << m_context->TEX0.TH);
+		const GSVector4 tsize = GSVector4(tw, th, 1.0f, 1.0f);
+
+		// Only rewrite big/small S or T when the clamping mode is CLAMP or REGION_CLAMP (if requested).
+		const GIFRegCLAMP& clamp = m_context->CLAMP;
+		const GSVector4 clamp_mask =
+			check_clamp_mode ?
+				GSVector4::cast(GSVector4i(
+					(clamp.WMS == CLAMP_CLAMP || clamp.WMS == CLAMP_REGION_CLAMP) ? 0xFFFFFFFF : 0,
+					(clamp.WMT == CLAMP_CLAMP || clamp.WMT == CLAMP_REGION_CLAMP) ? 0xFFFFFFFF : 0,
+					0,
+					0)) :
+				GSVector4::cast(GSVector4i::cxpr(0xFFFFFFFF));
+
+		const GSVector4 tex_bbox = m_vt.m_min.t.xyxy(m_vt.m_max.t) / tsize.xyxy();
+		const bool large_st = ((tex_bbox.abs() >= large_val) & clamp_mask).mask() || m_vt.nan.value;
+
+		if (large_st)
+		{
+			GL_PUSH("Large ST detected, rewriting vertices.");
+			if (m_index->tail > UINT16_MAX)
+			{
+				GL_INS("Too many vertices to rewrite safely, exiting.");
+				DevCon.Warning("Large ST detected but too many vertices to rewrite safely.");
+				return;
+			}
+
+			constexpr int n = GSUtil::GetClassVertexCount(primclass);
+
+			// Make sure the copy buffer is large enough.
+			while (m_max_vertex_count < m_index->tail)
+				GrowVertexBuffer();
+
+			GSVertex* RESTRICT vertex = m_vertex->buff;
+			GSVertex* RESTRICT vertex_copy = m_vertex->buff_copy;
+			u16* RESTRICT index = m_index->buff;
+			const int count = static_cast<int>(m_index->tail);
+
+			for (int i = 0; i < count; i += n)
+			{
+				GSVector4 stcq[n];
+
+				// Load STQ for this primitive.
+				for (int j = 0; j < n; j++)
+					stcq[j] = GSVector4::cast(GSVector4i(vertex[index[i + j]].m[0]));
+
+				// Perform Q division and see which values need to be rewritten.
+				GSVector4 uv[n];
+				GSVector4 small{}, big{}, nan{};
+				for (int j = 0; j < n; j++)
+				{
+					// For sprites always use Q of second vertex.
+					const GSVector4 q = primclass == GS_SPRITE_CLASS ? stcq[1].wwww() : stcq[j].wwww();
+					uv[j] = (stcq[j] / q).xyzw(GSVector4::zero());
+					small |= (uv[j] <= -large_val);
+					big |= (uv[j] >= large_val);
+					nan |= (uv[j] != uv[j]);
+				}
+
+				// Get the new values for fields that will be rewritten.
+				// The follows rules are used:
+				// 1. If there are small values but not big or nans, make all vertices small.
+				// 2. If there are big values but not small or nans, make all vertices big.
+				// 3. If there are both big and small values, or nans, make all vertices zero.
+				GSVector4 uv_new = GSVector4::zero();
+				uv_new = uv_new.blend32(-large_val, small);
+				uv_new = uv_new.blend32(large_val, big);
+				uv_new = uv_new.blend32(GSVector4::zero(), (small & big) | nan);
+
+				const GSVector4 rewrite = (((small | big) & clamp_mask) | nan).xyxy(GSVector4::zero());
+
+				// If both S and T are rewritten, no point in keeping Q. Just set it to 1.0f;
+				if ((rewrite.mask() & 3) == 3)
+				{
+					for (int j = 0; j < n; j++)
+						stcq[j] = stcq[j].template insert32<0, 3>(GSVector4::m_one);
+				}
+
+				// Rewrite the fields that require it and write to the copy buffer.
+				for (int j = 0; j < n; j++)
+				{
+					// For sprites always use Q of second vertex.
+					const GSVector4 q = (primclass == GS_SPRITE_CLASS) ? stcq[1].wwww() : stcq[j].wwww();
+					stcq[j] = stcq[j].blend32(uv_new * q, rewrite);
+
+					vertex_copy[i + j].m[0] = GSVector4i::cast(stcq[j]);
+					vertex_copy[i + j].m[1] = vertex[index[i + j]].m[1];
+					index[i + j] = i + j;
+				}
+			}
+
+			// Swap the buffers and fix the counts.
+			std::swap(m_vertex->buff, m_vertex->buff_copy);
+			m_vertex->head = m_vertex->next = m_vertex->tail = m_index->tail;
+
+			// Recalculate ST min/max/eq in the vertex trace.
+			GSVector4 tmin = GSVector4::cxpr(FLT_MAX);
+			GSVector4 tmax = GSVector4::cxpr(-FLT_MAX);
+			for (int i = 0; i < count; i += n)
+			{
+				for (int j = 0; j < n; j++)
+				{
+					GSVector4 stcq = GSVector4::cast(GSVector4i(m_vertex->buff[i + j].m[0]));
+					const float q = (primclass == GS_SPRITE_CLASS) ? m_vertex->buff[i + 1].RGBAQ.Q : stcq.w;
+					stcq = (stcq / q).xyzw(stcq);
+
+					tmin = tmin.min(stcq);
+					tmax = tmax.max(stcq);
+				}
+			}
+			m_vt.m_min.t = tmin.xyww() * tsize;
+			m_vt.m_max.t = tmax.xyww() * tsize;
+			m_vt.m_eq.stq = (m_vt.m_min.t == m_vt.m_max.t).mask();
+
+			// Dump vertices if needed.
+			if (GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()) && GSConfig.SaveInfo)
+			{
+				DumpVertices(GetDrawDumpPath("%05d_vertices_st_rewrite.txt", s_n));
+			}
+		}
+	}
+}
+
+void GSState::RewriteVerticesIfLargeST(const GSVector4& large_val, bool check_clamp_mode)
+{
+	switch (m_vt.m_primclass)
+	{
+		case GS_POINT_CLASS:
+			RewriteVerticesIfLargeSTImpl<GS_POINT_CLASS>(large_val, check_clamp_mode);
+			break;
+		case GS_LINE_CLASS:
+			RewriteVerticesIfLargeSTImpl<GS_LINE_CLASS>(large_val, check_clamp_mode);
+			break;
+		case GS_SPRITE_CLASS:
+			RewriteVerticesIfLargeSTImpl<GS_SPRITE_CLASS>(large_val, check_clamp_mode);
+			break;
+		case GS_TRIANGLE_CLASS:
+			RewriteVerticesIfLargeSTImpl<GS_TRIANGLE_CLASS>(large_val, check_clamp_mode);
+			break;
+		default:
+			pxFail("Invalid primclass"); // Impossible
+			break;
+	}
+}
+
 // GSTransferBuffer
 
 GSState::GSTransferBuffer::GSTransferBuffer()
@@ -7010,7 +7172,12 @@ GSVector2i GSState::GSPCRTCRegs::GetResolution()
 
 	if (!GSConfig.PCRTCOffsets)
 	{
-		if (PCRTCDisplays[0].enabled && PCRTCDisplays[1].enabled)
+		if (!PCRTCDisplays[0].enabled && !PCRTCDisplays[1].enabled)
+		{
+			const int shift = is_full_height ? 1 : 0;
+			resolution = {offsets.x, offsets.y << shift};
+		}
+		else if (PCRTCDisplays[0].enabled && PCRTCDisplays[1].enabled)
 		{
 			const GSVector4i combined_size = PCRTCDisplays[0].displayRect.runion(PCRTCDisplays[1].displayRect);
 			resolution = { combined_size.width(), combined_size.height() };

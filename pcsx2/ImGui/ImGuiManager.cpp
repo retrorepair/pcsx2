@@ -528,16 +528,6 @@ void ImGuiManager::UnloadFontData()
 	std::vector<u8>().swap(s_icon_pf_font_data);
 }
 
-static u16 Load16BE(const u8* data)
-{
-	return (data[0] << 8) | data[1];
-}
-
-static u32 Load32BE(const u8* data)
-{
-	return (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-}
-
 // Attempt to find the font index for the given font in its font file
 static u32 GetFontIndex(const ImGuiManager::FontInfo& font)
 {
@@ -1057,13 +1047,17 @@ void ImGuiManager::RenderOSD()
 	// acquire for IO.MousePos.
 	std::atomic_thread_fence(std::memory_order_acquire);
 
-	// Don't draw OSD when we're just running big picture.
-	if (VMManager::HasValidVM())
-		RenderOverlays();
-
 	const Common::Timer::Value current_time = Common::Timer::GetCurrentValue();
 	AcquirePendingOSDMessages(current_time);
-	DrawOSDMessages(current_time);
+
+	if (!FullscreenUI::HasActiveWindow())
+	{
+		// Don't draw OSD when we're just running big picture.
+		if (VMManager::HasValidVM())
+			RenderOverlays();
+
+		DrawOSDMessages(current_time);
+	}
 
 	// Cursors are always last.
 	DrawSoftwareCursors();

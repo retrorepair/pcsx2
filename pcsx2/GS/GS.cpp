@@ -14,6 +14,7 @@
 #include "GS/GSPerfMon.h"
 #include "GS/GSUtil.h"
 #include "GS/MultiISA.h"
+#include "GS/GSPerfMon.h"
 #include "Host.h"
 #include "Input/InputManager.h"
 #include "MTGS.h"
@@ -164,7 +165,7 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 
 	if (!g_gs_device->SetGPUTimingEnabled(true))
 		GSConfig.OsdShowGPU = false;
-	if (!g_gs_device->SetGPUPipelineStatisticsEnabled(true))
+	if (GSConfig.OsdShowGPUStats && !g_gs_device->SetGPUPipelineStatisticsEnabled(true))
 		GSConfig.OsdShowGPUStats = false;
 
 	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(new_api));
@@ -498,6 +499,23 @@ void GSStopGSDump()
 		g_gs_renderer->StopGSDump();
 }
 
+void GSStartSavingMetrics(u32 seconds)
+{
+	if (g_gs_renderer)
+		g_gs_renderer->StartSavingMetrics(seconds);
+}
+
+void GSDumpSavedMetrics()
+{
+	if (g_gs_renderer)
+		g_gs_renderer->DumpSavedMetrics();
+}
+
+bool GSIsSavingMetrics()
+{
+	return g_gs_renderer && g_gs_renderer->IsSavingMetrics();
+}
+
 bool GSBeginCapture(std::string filename)
 {
 	if (g_gs_renderer)
@@ -510,6 +528,21 @@ void GSEndCapture()
 {
 	if (g_gs_renderer)
 		g_gs_renderer->EndCapture();
+}
+
+void GSToggleVideoCapture()
+{
+	if (!g_gs_renderer)
+		return;
+
+	if (GSCapture::IsCapturing())
+	{
+		g_gs_renderer->EndCapture();
+		return;
+	}
+
+	std::string filename(fmt::format("{}.{}", GSGetBaseVideoFilename(), GSConfig.CaptureContainer));
+	g_gs_renderer->BeginCapture(std::move(filename));
 }
 
 void GSPresentCurrentFrame()
@@ -570,6 +603,11 @@ void GSSetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
 	Console.WriteLnFmt(Color_StrongCyan, "Setting vsync mode: {}{}", modes[static_cast<size_t>(mode)],
 		allow_present_throttle ? " (throttle allowed)" : "");
 	g_gs_device->SetVSyncMode(mode, allow_present_throttle);
+}
+
+void GSResetStats()
+{
+	g_perfmon.Reset();
 }
 
 bool GSWantsExclusiveFullscreen()
@@ -1201,17 +1239,7 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 		[](s32 pressed) {
 			if (!pressed)
 			{
-				if (GSCapture::IsCapturing())
-				{
-					MTGS::RunOnGSThread([]() { g_gs_renderer->EndCapture(); });
-					MTGS::WaitGS(false, false, false);
-					return;
-				}
-
-				MTGS::RunOnGSThread([]() {
-					std::string filename(fmt::format("{}.{}", GSGetBaseVideoFilename(), GSConfig.CaptureContainer));
-					g_gs_renderer->BeginCapture(std::move(filename));
-				});
+				MTGS::RunOnGSThread(&GSToggleVideoCapture);
 
 				// Sync GS thread. We want to start adding audio at the same time as video.
 				MTGS::WaitGS(false, false, false);
@@ -1231,6 +1259,24 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 					GSQueueSnapshot(std::string(), std::numeric_limits<u32>::max());
 				else
 					GSStopGSDump();
+			});
+		}},
+	{"GSStartSavingMetricsVariableFrames", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+			TRANSLATE_NOOP("Hotkeys", "Start Saving Performance Metrics (Press & Hold)"),
+		[](s32 pressed) {
+			MTGS::RunOnGSThread([pressed]() {
+				if (pressed > 0)
+					GSStartSavingMetrics(UINT32_MAX);
+				else
+					GSDumpSavedMetrics();
+			});
+		}},
+	{"GSStartSavingMetricsFixedFrames", TRANSLATE_NOOP("Hotkeys", "Graphics"),
+			TRANSLATE_NOOP("Hotkeys", "Start Saving Performance Metrics (Capture Timer)"),
+		[](s32 pressed) {
+			MTGS::RunOnGSThread([pressed]() {
+				if (pressed > 0 && !GSIsSavingMetrics())
+					GSStartSavingMetrics(GSConfig.SavedMetricsCaptureSeconds);
 			});
 		}},
 	{"ToggleSoftwareRendering", TRANSLATE_NOOP("Hotkeys", "Graphics"),

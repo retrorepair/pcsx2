@@ -74,7 +74,7 @@ OSDSettingsWidget::OSDSettingsWidget(SettingsWindow* settings_dialog, QWidget* p
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.showVideoCapture, "EmuCore/GS", "OsdShowVideoCapture", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.showInputRec, "EmuCore/GS", "OsdShowInputRec", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.showTextureReplacements, "EmuCore/GS", "OsdShowTextureReplacements", false);
-	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.warnAboutUnsafeSettings, "EmuCore", "OsdWarnAboutUnsafeSettings", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.warnAboutUnsafeSettings, "EmuCore", "WarnAboutUnsafeSettings", true);
 
 #ifndef _WIN32
 	// Currently DX12 only
@@ -128,7 +128,7 @@ OSDSettingsWidget::OSDSettingsWidget(SettingsWindow* settings_dialog, QWidget* p
 	dialog()->registerWidgetHelp(m_ui.showDebugGPU, tr("Show GPU Debug Info"),
 		tr("Unchecked"), tr("Shows debug information about the renderer."));
 #endif
-	dialog()->registerWidgetHelp(m_ui.showDebugGPU, tr("Show GPU Pipeline Statistics"),
+	dialog()->registerWidgetHelp(m_ui.showStatsGPU, tr("Show GPU Pipeline Statistics"),
 		tr("Unchecked"), tr("Shows GPU vertex shader and pixels shader invocations."));
 	dialog()->registerWidgetHelp(m_ui.showFrameTimes, tr("Show Frame Times"), tr("Unchecked"),
 		tr("Displays a graph showing the average frametimes."));
